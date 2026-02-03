@@ -110,42 +110,55 @@ async def manage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ אין לך הרשאה להשתמש בפקודה זו")
         return
     
-    # שליפת שירותים מהמסד נתונים
-    services = await db.get_services(owner_id=user_id)
-    
-    if not services:
+    text, reply_markup = await _render_manage_view(user_id)
+    if not reply_markup:
         await update.message.reply_text(
             "📭 אין שירותים רשומים.\n"
             "השתמש ב-/add_service כדי להוסיף שירות."
         )
         return
-    
-    # רענון סטטוסים
+
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def _get_services_with_refreshed_statuses(owner_id: int):
+    """שליפת שירותים + רענון סטטוסים מול Render."""
+    services = await db.get_services(owner_id=owner_id)
     for service in services:
         status = await render_api.get_service_status(service["service_id"])
         await db.update_service_status(service["service_id"], status)
         service["status"] = status
-    
-    # יצירת כפתורים
+    return services
+
+
+async def _render_manage_view(owner_id: int):
+    """
+    בניית מסך /manage: רשימת שירותים ככפתורים, ומתחת כפתור השעה הכל/המשך הכל.
+    מחזיר (text, reply_markup). אם אין שירותים, reply_markup=None.
+    """
+    services = await _get_services_with_refreshed_statuses(owner_id)
+    if not services:
+        return "📭 אין שירותים רשומים.", None
+
     keyboard = []
     for service in services:
-        emoji = render_api.status_emoji(service["status"])
+        emoji = render_api.status_emoji(service.get("status", "unknown"))
         button_text = f"{emoji} {service['name']}"
-        keyboard.append([
-            InlineKeyboardButton(
-                button_text,
-                callback_data=f"view_{service['service_id']}"
-            )
-        ])
-    
+        keyboard.append(
+            [InlineKeyboardButton(button_text, callback_data=f"view_{service['service_id']}")]
+        )
+
+    has_active = any(s.get("status") == "active" for s in services)
+    has_suspended = any(s.get("status") == "suspended" for s in services)
+
+    if has_active:
+        keyboard.append([InlineKeyboardButton("⏸ השעה הכל", callback_data="suspend_all")])
+    if has_suspended:
+        keyboard.append([InlineKeyboardButton("▶️ המשך הכל", callback_data="resume_all")])
+
     keyboard.append([InlineKeyboardButton("🔄 רענון", callback_data="refresh")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "🎛 **בחר שירות לניהול:**",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
+
+    return "🎛 **בחר שירות לניהול:**", InlineKeyboardMarkup(keyboard)
 
 
 async def add_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,32 +218,66 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # רענון
     if data == "refresh":
+        text, reply_markup = await _render_manage_view(user_id)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        return
+
+    # השעה הכל / המשך הכל
+    if data in ("suspend_all", "resume_all"):
         services = await db.get_services(owner_id=user_id)
-        
+        if not services:
+            await query.edit_message_text("📭 אין שירותים רשומים")
+            return
+
+        if data == "suspend_all":
+            await query.edit_message_text("⏳ משעה את כל השירותים...")
+        else:
+            await query.edit_message_text("⏳ ממשיך את כל השירותים...")
+
+        attempted = 0
+        succeeded = 0
+        failed = 0
+        skipped = 0
+
         for service in services:
-            status = await render_api.get_service_status(service["service_id"])
-            await db.update_service_status(service["service_id"], status)
-            service["status"] = status
-        
-        keyboard = []
-        for service in services:
-            emoji = render_api.status_emoji(service["status"])
-            button_text = f"{emoji} {service['name']}"
-            keyboard.append([
-                InlineKeyboardButton(
-                    button_text,
-                    callback_data=f"view_{service['service_id']}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🔄 רענון", callback_data="refresh")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🎛 **בחר שירות לניהול:**",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
+            service_id = service["service_id"]
+
+            status = await render_api.get_service_status(service_id)
+            await db.update_service_status(service_id, status)
+
+            if data == "suspend_all":
+                if status != "active":
+                    skipped += 1
+                    continue
+                attempted += 1
+                success = await render_api.suspend_service(service_id)
+                if success:
+                    succeeded += 1
+                    await db.update_service_status(service_id, "suspended")
+                    await db.log_action(service_id, "suspend", user_id, True)
+                else:
+                    failed += 1
+                    await db.log_action(service_id, "suspend", user_id, False, "API request failed")
+            else:
+                if status != "suspended":
+                    skipped += 1
+                    continue
+                attempted += 1
+                success = await render_api.resume_service(service_id)
+                if success:
+                    succeeded += 1
+                    await db.update_service_status(service_id, "active")
+                    await db.log_action(service_id, "resume", user_id, True)
+                else:
+                    failed += 1
+                    await db.log_action(service_id, "resume", user_id, False, "API request failed")
+
+        text, reply_markup = await _render_manage_view(user_id)
+        summary = (
+            f"✅ בוצע.\n"
+            f"ניסיון: {attempted} | הצליח: {succeeded} | נכשל: {failed} | דולג: {skipped}\n\n"
         )
+        await query.edit_message_text(summary + text, reply_markup=reply_markup, parse_mode="Markdown")
         return
     
     # הצגת שירות
@@ -334,28 +381,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # חזרה לתפריט ראשי
     if data == "back":
-        services = await db.get_services(owner_id=user_id)
-        
-        keyboard = []
-        for service in services:
-            status = await render_api.get_service_status(service["service_id"])
-            emoji = render_api.status_emoji(status)
-            button_text = f"{emoji} {service['name']}"
-            keyboard.append([
-                InlineKeyboardButton(
-                    button_text,
-                    callback_data=f"view_{service['service_id']}"
-                )
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🔄 רענון", callback_data="refresh")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🎛 **בחר שירות לניהול:**",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+        text, reply_markup = await _render_manage_view(user_id)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
