@@ -26,12 +26,19 @@ if not RENDER_API_KEY:
 if not MONGO_URI:
     raise ValueError("MONGO_URI חסר בקובץ .env")
 
-# המרת ADMIN_USER_ID למספר אם קיים
+# המרת ADMIN_USER_ID - תמיכה במספר מנהלים מופרדים בפסיקים
+ADMIN_USER_IDS = []
 if ADMIN_USER_ID:
     try:
-        ADMIN_USER_ID = int(ADMIN_USER_ID)
+        # אם יש פסיקים - זה רשימה של מנהלים
+        if ',' in ADMIN_USER_ID:
+            ADMIN_USER_IDS = [int(uid.strip()) for uid in ADMIN_USER_ID.split(',')]
+        else:
+            ADMIN_USER_IDS = [int(ADMIN_USER_ID)]
+        print(f"✅ {len(ADMIN_USER_IDS)} מנהלים מורשים")
     except ValueError:
         print("⚠️ ADMIN_USER_ID לא תקין, כולם יוכלו להשתמש בבוט")
-        ADMIN_USER_ID = None
+        ADMIN_USER_IDS = []
 else:
-    ADMIN_USER_ID = None
+    print("⚠️ ADMIN_USER_ID לא מוגדר, כולם יוכלו להשתמש בבוט")
+    ADMIN_USER_IDS = []

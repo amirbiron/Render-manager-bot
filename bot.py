@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 def is_admin(user_id: int) -> bool:
     """בדיקה אם המשתמש הוא מנהל"""
-    if config.ADMIN_USER_ID is None:
+    # אם הרשימה ריקה - כולם מנהלים
+    if not config.ADMIN_USER_IDS:
         return True
-    return user_id == config.ADMIN_USER_ID
+    # בדיקה אם המשתמש ברשימת המנהלים
+    return user_id in config.ADMIN_USER_IDS
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
