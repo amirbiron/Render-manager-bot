@@ -2,6 +2,9 @@
 בוט טלגרם לניהול שירותי Render
 """
 import logging
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -21,6 +24,39 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """HTTP handler קטן ל-Render (healthcheck + פתיחת PORT)."""
+
+    def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler naming)
+        if self.path in ("/", "/health", "/healthz", "/_health"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"not found")
+
+    def log_message(self, format, *args):  # noqa: A002
+        # למנוע ספאם בלוגים של Render
+        return
+
+
+def _start_health_server():
+    """
+    Render Web Service מצפה שייפתח פורט. אם לא נפתח, יופיע:
+    'No open ports detected, continuing to scan...'
+    """
+    port = int(os.getenv("PORT", "10000"))
+    host = os.getenv("HOST", "0.0.0.0")
+
+    server = HTTPServer((host, port), _HealthHandler)
+    logger.info("🌐 Health server listening on %s:%s", host, port)
+    server.serve_forever()
 
 
 def is_admin(user_id: int) -> bool:
@@ -336,6 +372,11 @@ async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """הרצת הבוט"""
+    # Render: פתיחת PORT כדי שהדיפלוי לא ייתקע.
+    # רץ ברקע כדי לא להפריע ל-run_polling.
+    if os.getenv("DISABLE_HEALTH_SERVER", "").lower() not in ("1", "true", "yes"):
+        threading.Thread(target=_start_health_server, daemon=True).start()
+
     # יצירת Application
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     
