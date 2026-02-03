@@ -22,6 +22,14 @@ class Database:
             # יצירת אינדקסים
             await self.db.services.create_index("service_id", unique=True)
             await self.db.services.create_index("owner_id")
+            await self.db.services.create_index("owners")
+
+            # מיגרציה לאחור: אם יש owner_id אבל אין owners, ניצור owners=[owner_id]
+            # (כדי לאפשר לכמה אדמינים לראות את אותו השירות בלי "לדרוס" בעלות)
+            await self.db.services.update_many(
+                {"owner_id": {"$exists": True}, "owners": {"$exists": False}},
+                [{"$set": {"owners": ["$owner_id"]}}],
+            )
             
         except ConnectionFailure as e:
             print(f"❌ שגיאה בהתחברות למונגו: {e}")
@@ -35,22 +43,25 @@ class Database:
     
     async def add_service(self, service_id: str, name: str, owner_id: int):
         """הוספת שירות חדש"""
-        service = {
-            "service_id": service_id,
-            "name": name,
-            "owner_id": owner_id,
-            "status": "unknown"
-        }
         result = await self.db.services.update_one(
             {"service_id": service_id},
-            {"$set": service},
+            {
+                # לא "לדרוס" בעלות קיימת; רק להוסיף אדמין לרשימת owners
+                "$set": {"service_id": service_id, "name": name},
+                "$setOnInsert": {"status": "unknown"},
+                "$addToSet": {"owners": owner_id},
+            },
             upsert=True
         )
         return result
     
     async def get_services(self, owner_id: int = None):
         """קבלת רשימת שירותים"""
-        query = {"owner_id": owner_id} if owner_id else {}
+        if owner_id:
+            # תמיכה גם ב-owner_id הישן וגם ב-owners החדש
+            query = {"$or": [{"owner_id": owner_id}, {"owners": owner_id}]}
+        else:
+            query = {}
         cursor = self.db.services.find(query)
         return await cursor.to_list(length=100)
     
