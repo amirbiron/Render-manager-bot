@@ -41,6 +41,19 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"not found")
 
+    def do_HEAD(self):  # noqa: N802 (BaseHTTPRequestHandler naming)
+        # UptimeRobot ושירותי ניטור אחרים לפעמים עושים HEAD במקום GET.
+        # אם אין do_HEAD, BaseHTTPRequestHandler יחזיר 501 Not Implemented.
+        if self.path in ("/", "/health", "/healthz", "/_health"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            return
+
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+
     def log_message(self, format, *args):  # noqa: A002
         # למנוע ספאם בלוגים של Render
         return
