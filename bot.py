@@ -313,6 +313,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("⏸ השעה", callback_data=f"suspend_{service_id}")])
         
         keyboard.append([InlineKeyboardButton("🔄 הפעל מחדש", callback_data=f"restart_{service_id}")])
+        keyboard.append([InlineKeyboardButton("🗑 הסר שירות", callback_data=f"confirmremove_{service_id}")])
         keyboard.append([InlineKeyboardButton("◀️ חזור", callback_data="back")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -379,6 +380,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ שגיאה בהפעלה מחדש")
         return
     
+    # אישור הסרת שירות
+    if data.startswith("confirmremove_"):
+        service_id = data.split("_", 1)[1]
+        service = await db.get_service(service_id)
+
+        if not service:
+            await query.edit_message_text("❌ שירות לא נמצא")
+            return
+
+        text = (
+            f"🗑 **האם להסיר את השירות?**\n\n"
+            f"🤖 {service['name']}\n"
+            f"🆔 `{service_id}`\n\n"
+            f"השירות יוסר מרשימת הניהול בלבד — הוא לא יימחק מ-Render."
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("✅ כן, הסר", callback_data=f"remove_{service_id}")],
+            [InlineKeyboardButton("◀️ ביטול", callback_data=f"view_{service_id}")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    # הסרת שירות
+    if data.startswith("remove_"):
+        service_id = data.split("_", 1)[1]
+        service = await db.get_service(service_id)
+        service_name = service["name"] if service else service_id
+
+        deleted = await db.delete_service(service_id)
+        if deleted:
+            await db.log_action(service_id, "remove", user_id, True)
+            await query.edit_message_text(
+                f"✅ השירות **{service_name}** הוסר מרשימת הניהול.",
+                parse_mode="Markdown"
+            )
+        else:
+            await db.log_action(service_id, "remove", user_id, False, "Service not found")
+            await query.edit_message_text("❌ שגיאה בהסרת השירות")
+        return
+
     # חזרה לתפריט ראשי
     if data == "back":
         text, reply_markup = await _render_manage_view(user_id)
