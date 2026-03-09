@@ -95,6 +95,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /manage - רשימת כל השירותים
 /add_service - הוספת שירות חדש
 /refresh - רענון סטטוסים
+/link - קישור לדשבורד Render
 
 בחר /manage כדי להתחיל!
 """
@@ -427,6 +428,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
+async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /link - קישור לדשבורד Render"""
+    await update.message.reply_text(
+        "🔗 https://dashboard.render.com/web/srv-d60o4jvpm1nc73ctkoqg"
+    )
+
+
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת /refresh - רענון סטטוסים"""
     user_id = update.effective_user.id
@@ -466,6 +474,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("manage", manage))
     application.add_handler(CommandHandler("add_service", add_service_command))
+    application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     
