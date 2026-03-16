@@ -93,5 +93,48 @@ class Database:
         }
         await self.db.logs.insert_one(log)
 
+    # ---- ניהול קבוצות ----
+
+    async def create_group(self, name: str, owner_id: int):
+        """יצירת קבוצה חדשה"""
+        result = await self.db.groups.insert_one({
+            "name": name,
+            "owner_id": owner_id,
+            "service_ids": [],
+        })
+        return result.inserted_id
+
+    async def get_groups(self, owner_id: int):
+        """קבלת כל הקבוצות של המשתמש"""
+        cursor = self.db.groups.find({"owner_id": owner_id})
+        return await cursor.to_list(length=50)
+
+    async def get_group(self, group_id: str):
+        """קבלת קבוצה לפי מזהה"""
+        from bson import ObjectId
+        return await self.db.groups.find_one({"_id": ObjectId(group_id)})
+
+    async def add_service_to_group(self, group_id: str, service_id: str):
+        """הוספת שירות לקבוצה"""
+        from bson import ObjectId
+        await self.db.groups.update_one(
+            {"_id": ObjectId(group_id)},
+            {"$addToSet": {"service_ids": service_id}}
+        )
+
+    async def remove_service_from_group(self, group_id: str, service_id: str):
+        """הסרת שירות מקבוצה"""
+        from bson import ObjectId
+        await self.db.groups.update_one(
+            {"_id": ObjectId(group_id)},
+            {"$pull": {"service_ids": service_id}}
+        )
+
+    async def delete_group(self, group_id: str):
+        """מחיקת קבוצה"""
+        from bson import ObjectId
+        result = await self.db.groups.delete_one({"_id": ObjectId(group_id)})
+        return result.deleted_count > 0
+
 # אובייקט גלובלי
 db = Database()
