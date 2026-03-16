@@ -94,6 +94,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **פקודות זמינות:**
 /manage - רשימת כל השירותים
 /add_service - הוספת שירות חדש
+/groups - ניהול קבוצות שירותים
+/create_group - יצירת קבוצה חדשה
 /refresh - רענון סטטוסים
 /link - קישור לדשבורד Render
 
@@ -157,6 +159,7 @@ async def _render_manage_view(owner_id: int):
     if has_suspended:
         keyboard.append([InlineKeyboardButton("▶️ המשך הכל", callback_data="resume_all")])
 
+    keyboard.append([InlineKeyboardButton("📁 קבוצות", callback_data="groups_back")])
     keyboard.append([InlineKeyboardButton("🔄 רענון", callback_data="refresh")])
 
     return "🎛 **בחר שירות לניהול:**", InlineKeyboardMarkup(keyboard)
@@ -216,7 +219,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     data = query.data
-    
+
+    # טיפול בקבוצות
+    if await _handle_group_callbacks(query, data, user_id):
+        return
+
     # רענון
     if data == "refresh":
         text, reply_markup = await _render_manage_view(user_id)
@@ -428,6 +435,346 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
+
+# ===== ניהול קבוצות =====
+
+async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /groups - הצגת רשימת קבוצות"""
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ אין לך הרשאה להשתמש בפקודה זו")
+        return
+
+    text, reply_markup = await _render_groups_view(user_id)
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def create_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """פקודת /create_group - יצירת קבוצה חדשה"""
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ אין לך הרשאה להשתמש בפקודה זו")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📝 שימוש:\n"
+            "`/create_group <שם_הקבוצה>`\n\n"
+            "דוגמה:\n"
+            "`/create_group בוטים-ראשיים`",
+            parse_mode="Markdown"
+        )
+        return
+
+    group_name = " ".join(context.args)
+    await db.create_group(group_name, user_id)
+    await update.message.reply_text(
+        f"✅ הקבוצה **{group_name}** נוצרה בהצלחה!\n"
+        f"השתמש ב-/groups כדי לנהל אותה ולהוסיף שירותים.",
+        parse_mode="Markdown"
+    )
+
+
+async def _render_groups_view(owner_id: int):
+    """בניית מסך /groups: רשימת קבוצות ככפתורים."""
+    groups = await db.get_groups(owner_id)
+
+    if not groups:
+        keyboard = [[InlineKeyboardButton("➕ צור קבוצה חדשה", callback_data="group_help_create")]]
+        return "📭 אין קבוצות.\nהשתמש ב-/create\\_group כדי ליצור קבוצה.", InlineKeyboardMarkup(keyboard)
+
+    keyboard = []
+    for group in groups:
+        count = len(group.get("service_ids", []))
+        button_text = f"📁 {group['name']} ({count} שירותים)"
+        keyboard.append(
+            [InlineKeyboardButton(button_text, callback_data=f"grpview_{group['_id']}")]
+        )
+
+    keyboard.append([InlineKeyboardButton("🔄 רענון", callback_data="groups_refresh")])
+
+    return "📁 **הקבוצות שלך:**", InlineKeyboardMarkup(keyboard)
+
+
+async def _render_group_detail_view(group_id: str, owner_id: int):
+    """בניית מסך פרטי קבוצה עם כפתורי פעולה."""
+    group = await db.get_group(group_id)
+    if not group:
+        return "❌ קבוצה לא נמצאה", None
+
+    service_ids = group.get("service_ids", [])
+    services_info = []
+    has_active = False
+    has_suspended = False
+
+    for sid in service_ids:
+        service = await db.get_service(sid)
+        if service:
+            status = await render_api.get_service_status(sid)
+            await db.update_service_status(sid, status)
+            emoji = render_api.status_emoji(status)
+            services_info.append(f"  {emoji} {service['name']}")
+            if status == "active":
+                has_active = True
+            elif status == "suspended":
+                has_suspended = True
+
+    text = f"📁 **{group['name']}**\n\n"
+    if services_info:
+        text += "**שירותים בקבוצה:**\n" + "\n".join(services_info) + "\n"
+    else:
+        text += "_(אין שירותים בקבוצה)_\n"
+
+    keyboard = []
+
+    if has_active:
+        keyboard.append([InlineKeyboardButton("⏸ השעה קבוצה", callback_data=f"grpsuspend_{group_id}")])
+    if has_suspended:
+        keyboard.append([InlineKeyboardButton("▶️ המשך קבוצה", callback_data=f"grpresume_{group_id}")])
+
+    keyboard.append([InlineKeyboardButton("➕ הוסף שירות", callback_data=f"grpadd_{group_id}")])
+
+    if service_ids:
+        keyboard.append([InlineKeyboardButton("➖ הסר שירות", callback_data=f"grpremservice_{group_id}")])
+
+    keyboard.append([InlineKeyboardButton("🗑 מחק קבוצה", callback_data=f"grpconfirmdelete_{group_id}")])
+    keyboard.append([InlineKeyboardButton("◀️ חזור לקבוצות", callback_data="groups_back")])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def _handle_group_callbacks(query, data, user_id):
+    """טיפול בכל ה-callbacks של קבוצות. מחזיר True אם טופל."""
+
+    # רענון רשימת קבוצות
+    if data == "groups_refresh":
+        text, reply_markup = await _render_groups_view(user_id)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # חזרה לרשימת קבוצות
+    if data == "groups_back":
+        text, reply_markup = await _render_groups_view(user_id)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # עזרה ליצירת קבוצה
+    if data == "group_help_create":
+        await query.edit_message_text(
+            "📝 כדי ליצור קבוצה, שלח:\n`/create_group <שם_הקבוצה>`",
+            parse_mode="Markdown"
+        )
+        return True
+
+    # צפייה בקבוצה
+    if data.startswith("grpview_"):
+        group_id = data.split("_", 1)[1]
+        text, reply_markup = await _render_group_detail_view(group_id, user_id)
+        if reply_markup:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(text)
+        return True
+
+    # השעיית קבוצה
+    if data.startswith("grpsuspend_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        if not group:
+            await query.edit_message_text("❌ קבוצה לא נמצאה")
+            return True
+
+        await query.edit_message_text(f"⏳ משעה את הקבוצה **{group['name']}**...", parse_mode="Markdown")
+
+        attempted = succeeded = failed = skipped = 0
+        for sid in group.get("service_ids", []):
+            status = await render_api.get_service_status(sid)
+            await db.update_service_status(sid, status)
+            if status != "active":
+                skipped += 1
+                continue
+            attempted += 1
+            success = await render_api.suspend_service(sid)
+            if success:
+                succeeded += 1
+                await db.update_service_status(sid, "suspended")
+                await db.log_action(sid, "suspend", user_id, True)
+            else:
+                failed += 1
+                await db.log_action(sid, "suspend", user_id, False, "API request failed")
+
+        text, reply_markup = await _render_group_detail_view(group_id, user_id)
+        summary = (
+            f"✅ הקבוצה **{group['name']}** הושעתה.\n"
+            f"ניסיון: {attempted} | הצליח: {succeeded} | נכשל: {failed} | דולג: {skipped}\n\n"
+        )
+        await query.edit_message_text(summary + text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # המשך קבוצה
+    if data.startswith("grpresume_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        if not group:
+            await query.edit_message_text("❌ קבוצה לא נמצאה")
+            return True
+
+        await query.edit_message_text(f"⏳ ממשיך את הקבוצה **{group['name']}**...", parse_mode="Markdown")
+
+        attempted = succeeded = failed = skipped = 0
+        for sid in group.get("service_ids", []):
+            status = await render_api.get_service_status(sid)
+            await db.update_service_status(sid, status)
+            if status != "suspended":
+                skipped += 1
+                continue
+            attempted += 1
+            success = await render_api.resume_service(sid)
+            if success:
+                succeeded += 1
+                await db.update_service_status(sid, "active")
+                await db.log_action(sid, "resume", user_id, True)
+            else:
+                failed += 1
+                await db.log_action(sid, "resume", user_id, False, "API request failed")
+
+        text, reply_markup = await _render_group_detail_view(group_id, user_id)
+        summary = (
+            f"✅ הקבוצה **{group['name']}** חזרה לפעול.\n"
+            f"ניסיון: {attempted} | הצליח: {succeeded} | נכשל: {failed} | דולג: {skipped}\n\n"
+        )
+        await query.edit_message_text(summary + text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # הוספת שירות לקבוצה - הצגת רשימת שירותים
+    if data.startswith("grpadd_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        if not group:
+            await query.edit_message_text("❌ קבוצה לא נמצאה")
+            return True
+
+        services = await db.get_services(owner_id=user_id)
+        existing_ids = set(group.get("service_ids", []))
+        available = [s for s in services if s["service_id"] not in existing_ids]
+
+        if not available:
+            keyboard = [[InlineKeyboardButton("◀️ חזור", callback_data=f"grpview_{group_id}")]]
+            await query.edit_message_text(
+                "📭 אין שירותים זמינים להוספה.\nכל השירותים כבר בקבוצה.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return True
+
+        keyboard = []
+        for s in available:
+            emoji = render_api.status_emoji(s.get("status", "unknown"))
+            keyboard.append([InlineKeyboardButton(
+                f"{emoji} {s['name']}",
+                callback_data=f"grpaddsvc_{group_id}_{s['service_id']}"
+            )])
+        keyboard.append([InlineKeyboardButton("◀️ חזור", callback_data=f"grpview_{group_id}")])
+
+        await query.edit_message_text(
+            f"➕ **בחר שירות להוספה לקבוצה {group['name']}:**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return True
+
+    # ביצוע הוספת שירות לקבוצה
+    if data.startswith("grpaddsvc_"):
+        parts = data.split("_", 2)
+        group_id = parts[1]
+        service_id = parts[2]
+        await db.add_service_to_group(group_id, service_id)
+        service = await db.get_service(service_id)
+        service_name = service["name"] if service else service_id
+
+        text, reply_markup = await _render_group_detail_view(group_id, user_id)
+        msg = f"✅ **{service_name}** נוסף לקבוצה!\n\n"
+        await query.edit_message_text(msg + text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # הסרת שירות מקבוצה - הצגת רשימת שירותים
+    if data.startswith("grpremservice_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        if not group:
+            await query.edit_message_text("❌ קבוצה לא נמצאה")
+            return True
+
+        keyboard = []
+        for sid in group.get("service_ids", []):
+            service = await db.get_service(sid)
+            if service:
+                emoji = render_api.status_emoji(service.get("status", "unknown"))
+                keyboard.append([InlineKeyboardButton(
+                    f"❌ {emoji} {service['name']}",
+                    callback_data=f"grpremsvc_{group_id}_{sid}"
+                )])
+        keyboard.append([InlineKeyboardButton("◀️ חזור", callback_data=f"grpview_{group_id}")])
+
+        await query.edit_message_text(
+            f"➖ **בחר שירות להסרה מהקבוצה {group['name']}:**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return True
+
+    # ביצוע הסרת שירות מקבוצה
+    if data.startswith("grpremsvc_"):
+        parts = data.split("_", 2)
+        group_id = parts[1]
+        service_id = parts[2]
+        await db.remove_service_from_group(group_id, service_id)
+        service = await db.get_service(service_id)
+        service_name = service["name"] if service else service_id
+
+        text, reply_markup = await _render_group_detail_view(group_id, user_id)
+        msg = f"✅ **{service_name}** הוסר מהקבוצה!\n\n"
+        await query.edit_message_text(msg + text, reply_markup=reply_markup, parse_mode="Markdown")
+        return True
+
+    # אישור מחיקת קבוצה
+    if data.startswith("grpconfirmdelete_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        if not group:
+            await query.edit_message_text("❌ קבוצה לא נמצאה")
+            return True
+
+        keyboard = [
+            [InlineKeyboardButton("✅ כן, מחק", callback_data=f"grpdelete_{group_id}")],
+            [InlineKeyboardButton("◀️ ביטול", callback_data=f"grpview_{group_id}")],
+        ]
+        await query.edit_message_text(
+            f"🗑 **האם למחוק את הקבוצה {group['name']}?**\n\n"
+            f"השירותים עצמם לא יימחקו, רק הקבוצה.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return True
+
+    # מחיקת קבוצה
+    if data.startswith("grpdelete_"):
+        group_id = data.split("_", 1)[1]
+        group = await db.get_group(group_id)
+        group_name = group["name"] if group else "?"
+        deleted = await db.delete_group(group_id)
+        if deleted:
+            text, reply_markup = await _render_groups_view(user_id)
+            msg = f"✅ הקבוצה **{group_name}** נמחקה!\n\n"
+            await query.edit_message_text(msg + text, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await query.edit_message_text("❌ שגיאה במחיקת הקבוצה")
+        return True
+
+    return False
+
+
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """פקודת /link - קישור לדשבורד Render"""
     await update.message.reply_text(
@@ -476,6 +823,8 @@ def main():
     application.add_handler(CommandHandler("add_service", add_service_command))
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("refresh", refresh_command))
+    application.add_handler(CommandHandler("groups", groups_command))
+    application.add_handler(CommandHandler("create_group", create_group_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     
     # התחלת הבוט
